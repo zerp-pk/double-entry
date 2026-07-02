@@ -1,6 +1,6 @@
 {
     "name": "zerp/double-entry",
-    "description": "Description for double-entry package",
+    "description": "Double-entry bookkeeping module for the Zerp ERP platform",
     "type": "library",
     "license": "MIT",
     "require": {},
