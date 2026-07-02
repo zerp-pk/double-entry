@@ -1,0 +1,29 @@
+{
+    "name": "zerp/double-entry",
+    "description": "Description for double-entry package",
+    "type": "library",
+    "license": "MIT",
+    "require": {},
+    "autoload": {
+        "psr-4": {
+            "Zerp\\DoubleEntry\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "ZAWAT OFFICIALS PVT LTD",
+            "email": "zawatofficials@gmail.com"
+        },
+        {
+            "name": "HafizMMoaz",
+            "email": "hafizmoazkhalid@gmail.com"
+        }
+    ],
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Zerp\\DoubleEntry\\Providers\\DoubleEntryServiceProvider"
+            ]
+        }
+    }
+}
