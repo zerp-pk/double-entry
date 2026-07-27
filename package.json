@@ -1,0 +1,15 @@
+{
+  "name": "@zerp/double-entry",
+  "version": "5.0.0",
+  "description": "Double-entry bookkeeping module for the Zerp ERP platform",
+  "license": "MIT",
+  "private": true,
+  "peerDependencies": {
+    "@inertiajs/react": "^1.0.0",
+    "axios": "^1.6.4",
+    "html2pdf.js": "^0.14.0",
+    "lucide-react": "^0.378.0",
+    "react": "^18.2.0",
+    "react-i18next": "^15.6.1"
+  }
+}
