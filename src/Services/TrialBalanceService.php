@@ -3,6 +3,7 @@
 namespace Zerp\DoubleEntry\Services;
 
 use Illuminate\Support\Facades\DB;
+use Zerp\DoubleEntry\Support\Money;
 
 class TrialBalanceService
 {
@@ -36,33 +37,38 @@ class TrialBalanceService
             ORDER BY coa.account_code ASC
         ", [$fromDate, $toDate, $fromDate, $toDate, $fromDate, $toDate, $fromDate, $toDate, creatorId()]);
 
-        $totalDebit = 0;
-        $totalCredit = 0;
+        $totalDebitCents = 0;
+        $totalCreditCents = 0;
         $accountsList = [];
 
         foreach($accounts as $account) {
-            $balance = (float)$account->balance;
+            $balanceCents = Money::toCents($account->balance);
 
-            if (abs($balance) > 0.01) {
-                $debit = 0;
-                $credit = 0;
+            // Every account carrying a balance belongs on the trial balance. This
+            // used to skip anything at or under a cent, which silently dropped those
+            // accounts from the report AND from the totals, so a one cent balance
+            // could make the ledger fail to balance with nothing on screen to explain
+            // it. Only a genuinely zero balance is left out now.
+            if ($balanceCents !== 0) {
+                $debitCents = 0;
+                $creditCents = 0;
 
-                if ($balance > 0) {
+                if ($balanceCents > 0) {
                     if ($account->normal_balance === 'debit') {
-                        $debit = $balance;
-                        $totalDebit += $debit;
+                        $debitCents = $balanceCents;
+                        $totalDebitCents += $debitCents;
                     } else {
-                        $credit = $balance;
-                        $totalCredit += $credit;
+                        $creditCents = $balanceCents;
+                        $totalCreditCents += $creditCents;
                     }
                 } else {
                     // Negative balance goes to opposite side
                     if ($account->normal_balance === 'debit') {
-                        $credit = abs($balance);
-                        $totalCredit += $credit;
+                        $creditCents = abs($balanceCents);
+                        $totalCreditCents += $creditCents;
                     } else {
-                        $debit = abs($balance);
-                        $totalDebit += $debit;
+                        $debitCents = abs($balanceCents);
+                        $totalDebitCents += $debitCents;
                     }
                 }
 
@@ -70,17 +76,19 @@ class TrialBalanceService
                     'id' => $account->id,
                     'account_code' => $account->account_code,
                     'account_name' => $account->account_name,
-                    'debit' => $debit,
-                    'credit' => $credit
+                    'debit' => Money::toAmount($debitCents),
+                    'credit' => Money::toAmount($creditCents)
                 ];
             }
         }
 
         return [
             'accounts' => $accountsList,
-            'total_debit' => round($totalDebit, 2),
-            'total_credit' => round($totalCredit, 2),
-            'is_balanced' => abs($totalDebit - $totalCredit) < 0.01,
+            'total_debit' => Money::toAmount($totalDebitCents),
+            'total_credit' => Money::toAmount($totalCreditCents),
+            // Exact: both sides are integer cents, so the old 0.01 tolerance is not
+            // needed and would only hide a real one cent imbalance.
+            'is_balanced' => $totalDebitCents === $totalCreditCents,
             'from_date' => $fromDate,
             'to_date' => $toDate
         ];

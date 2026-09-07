@@ -4,6 +4,7 @@ namespace Zerp\DoubleEntry\Services;
 
 use Zerp\Account\Models\ChartOfAccount;
 use Illuminate\Support\Facades\DB;
+use Zerp\DoubleEntry\Support\Money;
 
 class ProfitLossService
 {
@@ -39,30 +40,32 @@ class ProfitLossService
 
         $revenue = [];
         $expenses = [];
-        $totalRevenue = 0;
-        $totalExpenses = 0;
+        $totalRevenueCents = 0;
+        $totalExpensesCents = 0;
 
         foreach($accounts as $account) {
-            if (abs($account->balance) > 0.01) {
+            $balanceCents = Money::toCents($account->balance);
+
+            // Any account with a balance counts. The old check skipped balances at or
+            // under a cent, leaving them out of both the lists and the totals.
+            if ($balanceCents !== 0) {
                 $code = intval($account->account_code);
                 if ($code >= 4000 && $code <= 4999) {
                     $revenue[] = $account;
-                    $totalRevenue += $account->balance;
+                    $totalRevenueCents += $balanceCents;
                 } elseif ($code >= 5000 && $code <= 5999) {
                     $expenses[] = $account;
-                    $totalExpenses += $account->balance;
+                    $totalExpensesCents += $balanceCents;
                 }
             }
         }
 
-        $netProfit = $totalRevenue - $totalExpenses;
-
         return [
             'revenue' => $revenue,
             'expenses' => $expenses,
-            'total_revenue' => $totalRevenue,
-            'total_expenses' => $totalExpenses,
-            'net_profit' => $netProfit,
+            'total_revenue' => Money::toAmount($totalRevenueCents),
+            'total_expenses' => Money::toAmount($totalExpensesCents),
+            'net_profit' => Money::toAmount($totalRevenueCents - $totalExpensesCents),
             'from_date' => $fromDate,
             'to_date' => $toDate
         ];
