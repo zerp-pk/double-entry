@@ -10,6 +10,7 @@ use Zerp\Account\Models\JournalEntry;
 use Zerp\Account\Models\JournalEntryItem;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Zerp\DoubleEntry\Support\Money;
 
 class BalanceSheetService
 {
@@ -90,9 +91,9 @@ class BalanceSheetService
         // 2. Get all accounts with balances as of the specified date
         $accounts = $this->calculateAllAccountBalances($date);
 
-        $totalAssets = 0;
-        $totalLiabilities = 0;
-        $totalEquity = 0;
+        $totalAssetsCents = 0;
+        $totalLiabilitiesCents = 0;
+        $totalEquityCents = 0;
 
         // 3. Calculate net income from revenue/expense accounts as of date
         $netIncome = $this->calculateNetIncome($date);
@@ -103,29 +104,31 @@ class BalanceSheetService
 
         // 5. Create balance sheet items for each account
         foreach($accounts as $account) {
-            if (abs($account->current_balance) > 0.01) {
+            $amountCents = Money::toCents($account->current_balance);
+
+            // Any account with a balance belongs on the sheet. The old check dropped
+            // balances at or under a cent from the items and the totals alike.
+            if ($amountCents !== 0) {
                 $sectionInfo = $this->getAccountSection($account->account_code);
 
                 // Skip revenue/expense accounts and Retained Earnings (will add separately)
                 if ($sectionInfo['section_type'] !== 'other' && $account->id != $retainedEarningsId) {
-                    $amount = $account->current_balance;
-
                     BalanceSheetItem::create([
                         'balance_sheet_id' => $balanceSheet->id,
                         'account_id' => $account->id,
                         'section_type' => $sectionInfo['section_type'],
                         'sub_section' => $sectionInfo['sub_section'],
-                        'amount' => $amount,
+                        'amount' => Money::toAmount($amountCents),
                         'creator_id' => Auth::id(),
                         'created_by' => creatorId()
                     ]);
 
                     if ($sectionInfo['section_type'] == 'assets') {
-                        $totalAssets += $amount;
+                        $totalAssetsCents += $amountCents;
                     } elseif ($sectionInfo['section_type'] == 'liabilities') {
-                        $totalLiabilities += $amount;
+                        $totalLiabilitiesCents += $amountCents;
                     } elseif ($sectionInfo['section_type'] == 'equity') {
-                        $totalEquity += $amount;
+                        $totalEquityCents += $amountCents;
                     }
                 }
             }
@@ -134,37 +137,39 @@ class BalanceSheetService
         // 6. Add Retained Earnings with net income
         if ($retainedEarningsAccount) {
             // Get calculated balance from accounts array
-            $retainedEarningsCalculatedBalance = 0;
+            $retainedEarningsCalculatedCents = 0;
             foreach($accounts as $acc) {
                 if ($acc->id == $retainedEarningsAccount->id) {
-                    $retainedEarningsCalculatedBalance = $acc->current_balance;
+                    $retainedEarningsCalculatedCents = Money::toCents($acc->current_balance);
                     break;
                 }
             }
 
-            $retainedEarningsBalance = $retainedEarningsCalculatedBalance + $netIncome;
+            $retainedEarningsCents = $retainedEarningsCalculatedCents + Money::toCents($netIncome);
 
-            if (abs($retainedEarningsBalance) > 0.01) {
+            if ($retainedEarningsCents !== 0) {
                 BalanceSheetItem::create([
                     'balance_sheet_id' => $balanceSheet->id,
                     'account_id' => $retainedEarningsAccount->id,
                     'section_type' => 'equity',
                     'sub_section' => 'equity',
-                    'amount' => $retainedEarningsBalance,
+                    'amount' => Money::toAmount($retainedEarningsCents),
                     'creator_id' => Auth::id(),
                     'created_by' => creatorId()
                 ]);
 
-                $totalEquity += $retainedEarningsBalance;
+                $totalEquityCents += $retainedEarningsCents;
             }
         }
 
         // 7. Update balance sheet totals
         $balanceSheet->update([
-            'total_assets' => $totalAssets,
-            'total_liabilities' => $totalLiabilities,
-            'total_equity' => $totalEquity,
-            'is_balanced' => (abs($totalAssets - ($totalLiabilities + $totalEquity)) < 0.01)
+            'total_assets' => Money::toAmount($totalAssetsCents),
+            'total_liabilities' => Money::toAmount($totalLiabilitiesCents),
+            'total_equity' => Money::toAmount($totalEquityCents),
+            // Exact: assets must equal liabilities plus equity to the cent, so the
+            // old 0.01 tolerance would only ever hide a real one cent imbalance.
+            'is_balanced' => $totalAssetsCents === ($totalLiabilitiesCents + $totalEquityCents)
         ]);
 
         return $balanceSheet->id;
@@ -197,16 +202,24 @@ class BalanceSheetService
             GROUP BY coa.id, coa.account_code, coa.account_name, coa.normal_balance, coa.opening_balance, ob.effective_date
         ", [$asOfDate, $asOfDate, $asOfDate, $asOfDate, creatorId()]);
 
-        $netIncome = 0;
+        return Money::toAmount($this->netIncomeCents($revenueExpenseAccounts));
+    }
+
+    /**
+     * Revenue less expenses, in cents, so the running total stays exact.
+     */
+    private function netIncomeCents(array $revenueExpenseAccounts): int
+    {
+        $netIncomeCents = 0;
         foreach($revenueExpenseAccounts as $account) {
             if ($account->account_code >= '4000' && $account->account_code <= '4999') {
-                $netIncome += $account->current_balance;
+                $netIncomeCents += Money::toCents($account->current_balance);
             } elseif ($account->account_code >= '5000' && $account->account_code <= '5999') {
-                $netIncome -= $account->current_balance;
+                $netIncomeCents -= Money::toCents($account->current_balance);
             }
         }
 
-        return $netIncome;
+        return $netIncomeCents;
     }
 
     public function getOrCreateRetainedEarningsAccount()
@@ -225,7 +238,8 @@ class BalanceSheetService
             return false;
         }
 
-        $isBalanced = abs($balanceSheet->total_assets - ($balanceSheet->total_liabilities + $balanceSheet->total_equity)) < 0.01;
+        $isBalanced = Money::toCents($balanceSheet->total_assets)
+            === Money::toCents($balanceSheet->total_liabilities) + Money::toCents($balanceSheet->total_equity);
 
         $balanceSheet->update(['is_balanced' => $isBalanced]);
 
@@ -260,9 +274,10 @@ class BalanceSheetService
 
                 // Only create opening balances for balance sheet accounts
                 if ($sectionInfo['section_type'] !== 'other') {
-                    $openingBalance = $account->current_balance;
+                    $openingBalanceCents = Money::toCents($account->current_balance);
+                    $openingBalance = Money::toAmount($openingBalanceCents);
 
-                    if (abs($openingBalance) > 0.01) {
+                    if ($openingBalanceCents !== 0) {
                         OpeningBalance::updateOrCreate(
                             [
                                 'account_id' => $account->id,
@@ -299,17 +314,19 @@ class BalanceSheetService
         // Get revenue and expense accounts as of closing date
         $revenueExpenseAccounts = $this->calculateNetIncomeAccounts($closingDate);
 
-        $totalRevenue = 0;
-        $totalExpense = 0;
+        $totalRevenueCents = 0;
+        $totalExpenseCents = 0;
         $journalItems = [];
 
         foreach($revenueExpenseAccounts as $account) {
-            if (abs($account->current_balance) > 0.01) {
+            $balanceCents = Money::toCents($account->current_balance);
+
+            if ($balanceCents !== 0) {
                 $accountCode = intval($account->account_code);
 
                 if ($accountCode >= 4000 && $accountCode <= 4999) {
                     // Revenue accounts - debit to close
-                    $totalRevenue += $account->current_balance;
+                    $totalRevenueCents += $balanceCents;
                     $journalItems[] = [
                         'account_id' => $account->id,
                         'description' => 'Close revenue account',
@@ -318,7 +335,7 @@ class BalanceSheetService
                     ];
                 } elseif ($accountCode >= 5000 && $accountCode <= 5999) {
                     // Expense accounts - credit to close
-                    $totalExpense += $account->current_balance;
+                    $totalExpenseCents += $balanceCents;
                     $journalItems[] = [
                         'account_id' => $account->id,
                         'description' => 'Close expense account',
@@ -330,11 +347,13 @@ class BalanceSheetService
         }
 
         if (!empty($journalItems)) {
-            $netIncome = $totalRevenue - $totalExpense;
+            $netIncomeCents = $totalRevenueCents - $totalExpenseCents;
 
-            // Create closing journal entry
-            $totalDebits = $totalRevenue + ($netIncome < 0 ? abs($netIncome) : 0);
-            $totalCredits = $totalExpense + ($netIncome >= 0 ? $netIncome : 0);
+            // Create closing journal entry. Computed in cents because these two
+            // totals are written to the ledger and have to agree exactly.
+            $totalDebitsCents = $totalRevenueCents + ($netIncomeCents < 0 ? abs($netIncomeCents) : 0);
+            $totalCreditsCents = $totalExpenseCents + ($netIncomeCents >= 0 ? $netIncomeCents : 0);
+            $netIncome = Money::toAmount($netIncomeCents);
 
             $journalEntry = JournalEntry::create([
                 'journal_date' => $closingDate,
@@ -342,8 +361,8 @@ class BalanceSheetService
                 'reference_type' => 'year_end_close',
                 'reference_id' => null,
                 'description' => 'Year-end closing entries for ' . $financialYear,
-                'total_debit' => $totalDebits,
-                'total_credit' => $totalCredits,
+                'total_debit' => Money::toAmount($totalDebitsCents),
+                'total_credit' => Money::toAmount($totalCreditsCents),
                 'status' => 'posted',
                 'creator_id' => Auth::id(),
                 'created_by' => creatorId()

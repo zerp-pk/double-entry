@@ -7,6 +7,7 @@ use Zerp\Account\Models\OpeningBalance;
 use Zerp\Account\Models\JournalEntry;
 use Zerp\Account\Models\JournalEntryItem;
 use Illuminate\Support\Facades\DB;
+use Zerp\DoubleEntry\Support\Money;
 
 class ReportService
 {
@@ -44,9 +45,11 @@ class ReportService
             $openingBalance = $this->getOpeningBalance($accountId, $fromDate);
         }
 
-        $runningBalance = $openingBalance;
-        $transactions = $entries->map(function ($entry) use (&$runningBalance) {
-            $runningBalance += $entry->debit_amount - $entry->credit_amount;
+        // Accumulated in cents so a long ledger does not drift; each row is
+        // converted back for display.
+        $runningBalanceCents = Money::toCents($openingBalance);
+        $transactions = $entries->map(function ($entry) use (&$runningBalanceCents) {
+            $runningBalanceCents += Money::toCents($entry->debit_amount) - Money::toCents($entry->credit_amount);
             return [
                 'id' => $entry->id,
                 'date' => $entry->journal_date,
@@ -57,14 +60,14 @@ class ReportService
                 'reference_id' => $entry->reference_id,
                 'debit' => $entry->debit_amount,
                 'credit' => $entry->credit_amount,
-                'balance' => $runningBalance,
+                'balance' => Money::toAmount($runningBalanceCents),
             ];
         });
 
         return [
             'opening_balance' => $openingBalance,
             'transactions' => $transactions,
-            'closing_balance' => $runningBalance,
+            'closing_balance' => Money::toAmount($runningBalanceCents),
         ];
     }
 
@@ -74,7 +77,9 @@ class ReportService
             ->where('created_by', creatorId())
             ->first();
 
-        $balance = $openingBalance ? ($openingBalance->debit_amount - $openingBalance->credit_amount) : 0;
+        $balanceCents = $openingBalance
+            ? Money::toCents($openingBalance->debit_amount) - Money::toCents($openingBalance->credit_amount)
+            : 0;
 
         $priorTransactions = JournalEntryItem::join('journal_entries', 'journal_entry_items.journal_entry_id', '=', 'journal_entries.id')
             ->where('journal_entry_items.account_id', $accountId)
@@ -88,10 +93,11 @@ class ReportService
             ->first();
 
         if ($priorTransactions) {
-            $balance += ($priorTransactions->total_debit ?? 0) - ($priorTransactions->total_credit ?? 0);
+            $balanceCents += Money::toCents($priorTransactions->total_debit ?? 0)
+                - Money::toCents($priorTransactions->total_credit ?? 0);
         }
 
-        return $balance;
+        return Money::toAmount($balanceCents);
     }
 
     public function getJournalEntries($filters = [])
@@ -106,8 +112,8 @@ class ReportService
             ->get();
 
         return $query->map(function ($entry) {
-            $totalDebit = $entry->items->sum('debit_amount');
-            $totalCredit = $entry->items->sum('credit_amount');
+            $totalDebitCents = $entry->items->sum(fn($item) => Money::toCents($item->debit_amount));
+            $totalCreditCents = $entry->items->sum(fn($item) => Money::toCents($item->credit_amount));
 
             return [
                 'id' => $entry->id,
@@ -115,10 +121,11 @@ class ReportService
                 'date' => $entry->journal_date,
                 'reference_type' => $entry->reference_type,
                 'description' => $entry->description,
-                'total_debit' => $totalDebit,
-                'total_credit' => $totalCredit,
+                'total_debit' => Money::toAmount($totalDebitCents),
+                'total_credit' => Money::toAmount($totalCreditCents),
                 'status' => $entry->status,
-                'is_balanced' => abs($totalDebit - $totalCredit) < 0.01,
+                // Exact: a journal entry must balance to the cent.
+                'is_balanced' => $totalDebitCents === $totalCreditCents,
                 'items' => $entry->items->map(fn($item) => [
                     'account_code' => $item->account->account_code ?? '',
                     'account_name' => $item->account->account_name ?? '',
@@ -147,17 +154,19 @@ class ReportService
         }
 
         $grouped = [];
-        $totals = ['debit' => 0, 'credit' => 0, 'net' => 0];
+        $totalsCents = ['debit' => 0, 'credit' => 0, 'net' => 0];
 
         foreach ($accounts as $account) {
-            $balance = $this->calculateAccountBalance($account->id, $asOfDate);
-            
-            if (!$showZeroBalances && abs($balance) < 0.01) {
+            $balanceCents = Money::toCents($this->calculateAccountBalance($account->id, $asOfDate));
+
+            // Only a genuinely zero balance is hidden. The old check also swallowed
+            // any balance under a cent, which then went missing from the subtotals.
+            if (!$showZeroBalances && $balanceCents === 0) {
                 continue;
             }
 
-            $debit = $balance > 0 ? $balance : 0;
-            $credit = $balance < 0 ? abs($balance) : 0;
+            $debitCents = $balanceCents > 0 ? $balanceCents : 0;
+            $creditCents = $balanceCents < 0 ? abs($balanceCents) : 0;
 
             $type = $this->getAccountTypeLabel($account->account_code);
 
@@ -169,19 +178,27 @@ class ReportService
                 'account_code' => $account->account_code,
                 'account_name' => $account->account_name,
                 'account_type' => $type,
-                'debit' => $debit,
-                'credit' => $credit,
-                'net_balance' => $balance,
+                'debit' => Money::toAmount($debitCents),
+                'credit' => Money::toAmount($creditCents),
+                'net_balance' => Money::toAmount($balanceCents),
             ];
 
-            $grouped[$type]['subtotal_debit'] += $debit;
-            $grouped[$type]['subtotal_credit'] += $credit;
-            $grouped[$type]['subtotal_net'] += $balance;
+            $grouped[$type]['subtotal_debit'] += $debitCents;
+            $grouped[$type]['subtotal_credit'] += $creditCents;
+            $grouped[$type]['subtotal_net'] += $balanceCents;
 
-            $totals['debit'] += $debit;
-            $totals['credit'] += $credit;
-            $totals['net'] += $balance;
+            $totalsCents['debit'] += $debitCents;
+            $totalsCents['credit'] += $creditCents;
+            $totalsCents['net'] += $balanceCents;
         }
+
+        // Subtotals and totals were accumulated in cents; convert at the boundary.
+        foreach ($grouped as $type => $group) {
+            foreach (['subtotal_debit', 'subtotal_credit', 'subtotal_net'] as $key) {
+                $grouped[$type][$key] = Money::toAmount($group[$key]);
+            }
+        }
+        $totals = array_map(fn($cents) => Money::toAmount($cents), $totalsCents);
 
         return [
             'grouped' => $grouped,
@@ -243,38 +260,42 @@ class ReportService
         $revenue = [];
         $cogs = [];
         $expenses = [];
-        $totalRevenue = 0;
-        $totalCogs = 0;
-        $totalExpenses = 0;
+        $totalRevenueCents = 0;
+        $totalCogsCents = 0;
+        $totalExpensesCents = 0;
 
         foreach ($accounts as $account) {
-            $balance = $this->getAccountBalanceForPeriod($account->id, $fromDate, $toDate);
-            
-            if (!$showZeroBalances && abs($balance) < 0.01) {
+            $balanceCents = Money::toCents($this->getAccountBalanceForPeriod($account->id, $fromDate, $toDate));
+
+            if (!$showZeroBalances && $balanceCents === 0) {
                 continue;
             }
 
             $code = (int) $account->account_code;
+            $amountCents = abs($balanceCents);
             $item = [
                 'account_code' => $account->account_code,
                 'account_name' => $account->account_name,
-                'amount' => abs($balance),
+                'amount' => Money::toAmount($amountCents),
             ];
 
             if ($code >= 4000 && $code < 5000) {
                 $revenue[] = $item;
-                $totalRevenue += abs($balance);
+                $totalRevenueCents += $amountCents;
             } elseif ($code >= 5000 && $code < 5100) {
                 $cogs[] = $item;
-                $totalCogs += abs($balance);
+                $totalCogsCents += $amountCents;
             } elseif ($code >= 5100 && $code < 6000) {
                 $expenses[] = $item;
-                $totalExpenses += abs($balance);
+                $totalExpensesCents += $amountCents;
             }
         }
 
-        $grossProfit = $totalRevenue - $totalCogs;
-        $operatingIncome = $grossProfit - $totalExpenses;
+        $totalRevenue = Money::toAmount($totalRevenueCents);
+        $totalCogs = Money::toAmount($totalCogsCents);
+        $totalExpenses = Money::toAmount($totalExpensesCents);
+        $grossProfit = Money::toAmount($totalRevenueCents - $totalCogsCents);
+        $operatingIncome = Money::toAmount($totalRevenueCents - $totalCogsCents - $totalExpensesCents);
         $netIncome = $operatingIncome;
 
         return [
@@ -367,29 +388,29 @@ class ReportService
             ->get();
 
         $expenses = [];
-        $totalExpenses = 0;
+        $totalExpensesCents = 0;
 
         foreach ($accounts as $account) {
-            $balance = $this->getAccountBalanceForPeriod($account->id, $fromDate, $toDate);
-            
-            if (abs($balance) < 0.01) {
+            $balanceCents = Money::toCents($this->getAccountBalanceForPeriod($account->id, $fromDate, $toDate));
+
+            if ($balanceCents === 0) {
                 continue;
             }
 
             $expenses[] = [
                 'account_code' => $account->account_code,
                 'account_name' => $account->account_name,
-                'amount' => abs($balance),
+                'amount' => Money::toAmount(abs($balanceCents)),
             ];
 
-            $totalExpenses += abs($balance);
+            $totalExpensesCents += abs($balanceCents);
         }
 
         usort($expenses, fn($a, $b) => $b['amount'] <=> $a['amount']);
 
         return [
             'expenses' => $expenses,
-            'total_expenses' => $totalExpenses,
+            'total_expenses' => Money::toAmount($totalExpensesCents),
             'from_date' => $fromDate,
             'to_date' => $toDate,
         ];
