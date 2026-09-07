@@ -56,7 +56,7 @@ class BalanceSheetController extends Controller
                 ->where('created_by', creatorId())
                 ->when(request('financial_year'), fn($q) => $q->where('financial_year', request('financial_year')))
                 ->when(request('status'), fn($q) => $q->where('status', request('status')))
-                ->when(request('sort'), fn($q) => $q->orderBy(request('sort'), request('direction', 'desc')), fn($q) => $q->latest())
+                ->when(request('sort'), fn($q) => $q->sortSafe(request('sort'), request('direction'), 'created_at', 'desc'), fn($q) => $q->latest())
                 ->paginate(request('per_page', 10))
                 ->withQueryString();
 
@@ -236,7 +236,7 @@ class BalanceSheetController extends Controller
                     'previousPeriod:id,balance_sheet_date,financial_year'
                 ])
                 ->where('created_by', creatorId())
-                ->when(request('sort'), fn($q) => $q->orderBy(request('sort'), request('direction', 'desc')), fn($q) => $q->orderBy('comparison_date', 'desc'))
+                ->when(request('sort'), fn($q) => $q->sortSafe(request('sort'), request('direction'), 'comparison_date', 'desc'), fn($q) => $q->orderBy('comparison_date', 'desc'))
                 ->paginate(request('per_page', 15))
                 ->withQueryString();
 

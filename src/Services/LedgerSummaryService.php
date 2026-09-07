@@ -36,7 +36,22 @@ class LedgerSummaryService
                       ->orWhere('journal_entry_items.description', 'like', '%' . request('search') . '%')
                       ->orWhere('journal_entries.description', 'like', '%' . request('search') . '%');
             }))
-            ->when(request('sort'), fn($q) => $q->orderBy(request('sort'), request('direction', 'desc')), fn($q) => $q->orderBy('journal_entries.journal_date', 'desc')->orderBy('journal_entry_items.id', 'desc'));
+            ->when(request('sort'), function ($q) {
+                // Not sortSafe: this query is joined, so the sortable columns live on
+                // other tables and would not be found on the base table. The three the
+                // UI marks sortable are mapped explicitly; anything else is ignored.
+                $sortable = [
+                    'journal_date' => 'journal_entries.journal_date',
+                    'account_code' => 'chart_of_accounts.account_code',
+                    'account_name' => 'chart_of_accounts.account_name',
+                ];
+                $column = $sortable[request('sort')] ?? 'journal_entries.journal_date';
+                $direction = in_array(strtolower((string) request('direction')), ['asc', 'desc'], true)
+                    ? strtolower(request('direction'))
+                    : 'desc';
+
+                return $q->orderBy($column, $direction);
+            }, fn($q) => $q->orderBy('journal_entries.journal_date', 'desc')->orderBy('journal_entry_items.id', 'desc'));
 
         if ($paginate) {
             return $query->paginate(request('per_page', 10))->withQueryString();
